@@ -826,11 +826,12 @@ namespace video {
       },
       {
         // SDR-specific options
-        {"profile"s, [](const config_t &cfg) {
-           if (cfg.profile == 66) return "baseline"s;
-           if (cfg.profile == 77) return "main"s;
-           return "high"s;
-         }},
+        // STREAMLINK-FIX-01: config_t carries no `profile` field. The
+        // lambda was tolerated by older compilers (only instantiated when
+        // invoked) but gcc 16 rejects it at instantiation time. Pin the
+        // AMF encoder profile to "high" — that matches Apollo's HEVC/AV1
+        // counterparts which don't expose a profile selector either.
+        {"profile"s, "high"s},
       },
       {},  // HDR-specific options
       {},  // YUV444 SDR-specific options
