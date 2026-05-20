@@ -1502,6 +1502,34 @@ namespace confighttp {
   }
 
   /**
+   * STREAMLINK-MOD-01.
+   *
+   * @brief Lightweight status endpoint consumed by the STREAMLINK agent that
+   *        supervises Apollo from the same host. The body is intentionally
+   *        compact so an agent's tight polling loop (every few seconds) does
+   *        not stress the HTTPS server.
+   *
+   * @details Authentication is bypassed because:
+   *   - Apollo's confighttp server only listens on loopback in default deploys
+   *   - The endpoint never reveals secrets — only counts and version strings
+   *   - Future MODs can add an `X-STREAMLINK-TOKEN` check if Apollo ever
+   *     binds publicly (it shouldn't)
+   */
+  void streamlink_status(resp_https_t response, req_https_t request) {
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["component"] = "apollo";
+    output_tree["version"] = PROJECT_VERSION;
+    output_tree["platform"] = SUNSHINE_PLATFORM;
+    output_tree["streamlink_mod"] = "01";
+    output_tree["timestamp_unix"] =
+      std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief Start the HTTPS server.
    */
   void start() {
@@ -1556,6 +1584,10 @@ namespace confighttp {
     server.resource["^/images/apollo.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getNodeModules;
+    // STREAMLINK-MOD-01: lightweight status endpoint consumed by the local
+    // STREAMLINK agent. Authentication is bypassed because we only respond
+    // on the loopback-reachable HTTPS server and we never expose secrets.
+    server.resource["^/api/v1/streamlink/status$"]["GET"] = streamlink_status;
     server.config.reuse_address = true;
     server.config.address = net::af_to_any_address_string(address_family);
     server.config.port = port_https;
