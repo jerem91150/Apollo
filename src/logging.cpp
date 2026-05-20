@@ -3,6 +3,7 @@
  * @brief Definitions for logging related functions.
  */
 // standard includes
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
@@ -16,6 +17,7 @@
 #include <boost/log/expressions.hpp>
 #include <boost/log/sinks.hpp>
 #include <boost/log/sources/severity_logger.hpp>
+#include <nlohmann/json.hpp>
 
 // local includes
 #include "logging.h"
@@ -60,6 +62,19 @@ namespace logging {
     sink.reset();
   }
 
+  // STREAMLINK-MOD-04: cached once at process start.
+  // Set STREAMLINK_LOG_JSON=1 in the environment to get one JSON object per line
+  // instead of the default human-readable line. JSON shape:
+  //   {"timestamp_ms":..., "level":"info|warn|...", "message":"..."}
+  // Picked up by the streamlink-agent's structured log aggregator.
+  static bool json_logs_enabled() {
+    static const bool enabled = []() {
+      const char *v = std::getenv("STREAMLINK_LOG_JSON");
+      return v != nullptr && std::string_view(v) == "1";
+    }();
+    return enabled;
+  }
+
   void formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os) {
     constexpr const char *message = "Message";
     constexpr const char *severity = "Severity";
@@ -67,33 +82,54 @@ namespace logging {
     auto log_level = view.attribute_values()[severity].extract<int>().get();
 
     std::string_view log_type;
+    std::string_view log_type_json;
     switch (log_level) {
       case 0:
         log_type = "Verbose: "sv;
+        log_type_json = "verbose"sv;
         break;
       case 1:
         log_type = "Debug: "sv;
+        log_type_json = "debug"sv;
         break;
       case 2:
         log_type = "Info: "sv;
+        log_type_json = "info"sv;
         break;
       case 3:
         log_type = "Warning: "sv;
+        log_type_json = "warning"sv;
         break;
       case 4:
         log_type = "Error: "sv;
+        log_type_json = "error"sv;
         break;
       case 5:
         log_type = "Fatal: "sv;
+        log_type_json = "fatal"sv;
         break;
 #ifdef SUNSHINE_TESTS
       case 10:
         log_type = "Tests: "sv;
+        log_type_json = "tests"sv;
         break;
 #endif
     };
 
     auto now = std::chrono::system_clock::now();
+
+    if (json_logs_enabled()) {
+      // STREAMLINK-MOD-04: structured JSON output.
+      const auto ms_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+      nlohmann::json j;
+      j["timestamp_ms"] = ms_since_epoch;
+      j["level"] = std::string(log_type_json);
+      j["message"] = view.attribute_values()[message].extract<std::string>().get();
+      os << j.dump();
+      return;
+    }
+
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       now - std::chrono::time_point_cast<std::chrono::seconds>(now)
     );
