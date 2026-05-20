@@ -1494,15 +1494,21 @@ namespace input {
         return;
       }
 
-      // Pop off the first entry, which we will send
-      entry = input->input_queue.front();
+      // STREAMLINK-OPT-02: move out of the queue instead of copying.
+      // Each entry is the raw decrypted Moonlight input packet; at high
+      // gamepad poll rates (250 Hz) the copy chained 3-15 KB allocations
+      // every event. The list owns the vector until pop_front anyway.
+      entry = std::move(input->input_queue.front());
       payload = (PNV_INPUT_HEADER) entry.data();
       input->input_queue.pop_front();
 
       // Try to batch with remaining items on the queue
       auto i = input->input_queue.begin();
       while (i != input->input_queue.end()) {
-        auto batchable_entry = *i;
+        // STREAMLINK-OPT-02: bind to a reference — we only read .data() and
+        // the list controls the lifetime; the previous code copied every
+        // candidate entry just to peek at its header.
+        const auto &batchable_entry = *i;
         auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
 
         auto batch_result = batch(payload, batchable_payload);
