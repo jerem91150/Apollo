@@ -727,23 +727,36 @@ namespace stream {
 
   /**
    * @brief Combines two buffers and inserts new buffers at each slice boundary of the result.
+   * @param out The output buffer. Will be resized to fit the result; capacity is reused
+   *            across calls (STREAMLINK-OPT-01).
    * @param insert_size The number of bytes to insert.
    * @param slice_size The number of bytes between insertions.
    * @param data1 The first data buffer.
    * @param data2 The second data buffer.
+   *
+   * @details This is the hot per-video-frame copy path. The pre-OPT-01 version
+   * returned a fresh `std::vector<uint8_t>` every call which triggered a heap
+   * allocation at the encoder's framerate (60-120 Hz). The output-parameter
+   * variant lets the caller reuse a thread_local scratch buffer and amortise
+   * the allocation across the session.
    */
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+  void concat_and_insert_into(std::vector<uint8_t> &out, uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
     auto data_size = data1.size() + data2.size();
     auto pad = data_size % slice_size != 0;
     auto elements = data_size / slice_size + (pad ? 1 : 0);
 
-    std::vector<uint8_t> result;
-    result.resize(elements * insert_size + data_size);
+    const auto needed = elements * insert_size + data_size;
+    if (out.size() < needed) {
+      out.resize(needed);
+    } else {
+      // Keep capacity, just lie about size; we overwrite everything below.
+      out.resize(needed);
+    }
 
     auto next = std::begin(data1);
     auto end = std::end(data1);
     for (auto x = 0; x < elements; ++x) {
-      void *p = &result[x * (insert_size + slice_size)];
+      void *p = &out[x * (insert_size + slice_size)];
 
       // For the last iteration, only copy to the end of the data
       if (x == elements - 1) {
@@ -766,25 +779,45 @@ namespace stream {
         next += slice_size;
       }
     }
+  }
 
+  /**
+   * @brief Compatibility wrapper around concat_and_insert_into for callers that
+   *        do not own a scratch buffer.
+   */
+  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+    std::vector<uint8_t> result;
+    concat_and_insert_into(result, insert_size, slice_size, data1, data2);
     return result;
   }
 
-  std::vector<uint8_t> replace(const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
-    std::vector<uint8_t> replaced;
-    replaced.reserve(original.size() + _new.size() - old.size());
+  /**
+   * @brief Replaces `old` with `_new` in `original`, writing into `out`
+   *        (STREAMLINK-OPT-01).
+   *
+   * @details Same rationale as concat_and_insert_into: this is in the
+   * per-IDR-frame path (avc/hevc SPS/PPS rewriting) and the original
+   * allocated a fresh vector per call.
+   */
+  void replace_into(std::vector<uint8_t> &out, const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
+    out.clear();
+    out.reserve(original.size() + _new.size() - old.size());
 
     auto begin = std::begin(original);
     auto end = std::end(original);
     auto next = std::search(begin, end, std::begin(old), std::end(old));
 
-    std::copy(begin, next, std::back_inserter(replaced));
+    std::copy(begin, next, std::back_inserter(out));
     if (next != end) {
-      std::copy(std::begin(_new), std::end(_new), std::back_inserter(replaced));
-      std::copy(next + old.size(), end, std::back_inserter(replaced));
+      std::copy(std::begin(_new), std::end(_new), std::back_inserter(out));
+      std::copy(next + old.size(), end, std::back_inserter(out));
     }
+  }
 
-    return replaced;
+  std::vector<uint8_t> replace(const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
+    std::vector<uint8_t> out;
+    replace_into(out, original, old, _new);
+    return out;
   }
 
   /**
@@ -1359,19 +1392,29 @@ namespace stream {
       auto lowseq = session->video.lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
-      std::vector<uint8_t> payload_with_replacements;
+
+      // STREAMLINK-OPT-01: thread_local scratch buffers reused across frames
+      // instead of fresh `std::vector<uint8_t>` per call. The two buffers
+      // (replacements + concat) are ping-pong'd: one feeds the other.
+      thread_local std::vector<uint8_t> tl_payload_with_replacements;
+      thread_local std::vector<uint8_t> tl_payload_with_replacements_alt;
+      tl_payload_with_replacements.clear();
+      tl_payload_with_replacements_alt.clear();
 
       // Apply replacements on the packet payload before performing any other operations.
       // We need to know the final frame size to calculate the last packet size, and we
       // must avoid matching replacements against the frame header or any other non-video
       // part of the payload.
       if (packet->is_idr() && packet->replacements) {
+        auto *active = &tl_payload_with_replacements;
+        auto *spare = &tl_payload_with_replacements_alt;
         for (auto &replacement : *packet->replacements) {
           auto frame_old = replacement.old;
           auto frame_new = replacement._new;
 
-          payload_with_replacements = replace(payload, frame_old, frame_new);
-          payload = {(char *) payload_with_replacements.data(), payload_with_replacements.size()};
+          replace_into(*spare, payload, frame_old, frame_new);
+          std::swap(active, spare);
+          payload = {(char *) active->data(), active->size()};
         }
       }
 
@@ -1403,9 +1446,11 @@ namespace stream {
       // Insert space for packet headers
       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
       auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
-      auto payload_new = concat_and_insert(sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
+      // STREAMLINK-OPT-01: thread_local scratch reused across frames.
+      thread_local std::vector<uint8_t> tl_payload_new;
+      concat_and_insert_into(tl_payload_new, sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
 
-      payload = std::string_view {(char *) payload_new.data(), payload_new.size()};
+      payload = std::string_view {(char *) tl_payload_new.data(), tl_payload_new.size()};
 
       // There are 2 bits for FEC block count for a maximum of 4 FEC blocks
       constexpr auto MAX_FEC_BLOCKS = 4;
