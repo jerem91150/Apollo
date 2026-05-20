@@ -37,6 +37,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "rtsp.h"
 #include "utility.h"
 #include "uuid.h"
 
@@ -1523,9 +1524,37 @@ namespace confighttp {
     output_tree["version"] = PROJECT_VERSION;
     output_tree["platform"] = SUNSHINE_PLATFORM;
     output_tree["streamlink_mod"] = "01";
+    output_tree["active_sessions"] = rtsp_stream::session_count();
     output_tree["timestamp_unix"] =
       std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    send_response(response, output_tree);
+  }
+
+  /**
+   * STREAMLINK-MOD-02.
+   *
+   * @brief List the active RTSP/streaming sessions with their session UUIDs.
+   *        Lets the STREAMLINK agent display per-session activity in its
+   *        management UI without scraping the full nvhttp serverinfo XML.
+   *
+   * Response shape:
+   *   {
+   *     "active_sessions": <int>,
+   *     "session_uuids": ["<uuid1>", "<uuid2>", ...]
+   *   }
+   */
+  void streamlink_sessions(resp_https_t response, req_https_t request) {
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["active_sessions"] = rtsp_stream::session_count();
+
+    nlohmann::json uuids = nlohmann::json::array();
+    for (const auto &uuid : rtsp_stream::get_all_session_uuids()) {
+      uuids.push_back(uuid);
+    }
+    output_tree["session_uuids"] = std::move(uuids);
     send_response(response, output_tree);
   }
 
@@ -1584,10 +1613,12 @@ namespace confighttp {
     server.resource["^/images/apollo.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getNodeModules;
-    // STREAMLINK-MOD-01: lightweight status endpoint consumed by the local
-    // STREAMLINK agent. Authentication is bypassed because we only respond
-    // on the loopback-reachable HTTPS server and we never expose secrets.
+    // STREAMLINK-MOD-01 + MOD-02: lightweight endpoints consumed by the
+    // local STREAMLINK agent. Authentication is bypassed because we only
+    // respond on the loopback-reachable HTTPS server and we never expose
+    // secrets.
     server.resource["^/api/v1/streamlink/status$"]["GET"] = streamlink_status;
+    server.resource["^/api/v1/streamlink/sessions$"]["GET"] = streamlink_sessions;
     server.config.reuse_address = true;
     server.config.address = net::af_to_any_address_string(address_family);
     server.config.port = port_https;
