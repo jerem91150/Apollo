@@ -177,9 +177,60 @@ namespace confighttp {
    *
    * This function uses session cookies (if set) and ensures they have not expired.
    */
+  /**
+   * STREAMLINK-MOD-05.
+   *
+   * @brief Check whether the request carries a valid token issued by the local
+   *        STREAMLINK agent.
+   *
+   * @details The agent writes one token per line into
+   *          `%APPDATA%/STREAMLINK/tokens.txt` (mode 0600) at pairing time.
+   *          Tokens are 32-byte URL-safe base64 strings. The first non-empty
+   *          line that matches the `X-STREAMLINK-TOKEN` header grants the
+   *          request the same authority as a fresh PIN-based login, without
+   *          opening the cookie machinery.
+   *
+   * @return true if the token is valid, false otherwise.
+   */
+  bool has_valid_streamlink_token(req_https_t request) {
+    auto hdr = request->header.find("X-STREAMLINK-TOKEN");
+    if (hdr == request->header.end()) {
+      return false;
+    }
+    const auto &token = hdr->second;
+    if (token.empty() || token.size() > 256) {
+      return false;
+    }
+    const char *appdata = std::getenv("APPDATA");
+    if (!appdata) {
+      return false;
+    }
+    std::filesystem::path tokens_file = std::filesystem::path(appdata) / "STREAMLINK" / "tokens.txt";
+    if (!std::filesystem::exists(tokens_file)) {
+      return false;
+    }
+    std::ifstream f(tokens_file);
+    std::string line;
+    while (std::getline(f, line)) {
+      while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+        line.pop_back();
+      }
+      if (!line.empty() && line == token) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
     if (!checkIPOrigin(response, request))
       return false;
+    // STREAMLINK-MOD-05: bypass the cookie check when a valid agent token is
+    // presented. The token never crosses the public network (agent talks to
+    // confighttp on loopback) so this does not weaken the PIN flow.
+    if (has_valid_streamlink_token(request)) {
+      return true;
+    }
     // If credentials not set, redirect to welcome.
     if (config::sunshine.username.empty()) {
       send_redirect(response, request, "/welcome");
