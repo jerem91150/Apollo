@@ -29,6 +29,7 @@ extern "C" {
 #include "network.h"
 #include "rtsp.h"
 #include "stream.h"
+#include "streamlink_callbacks.h"
 #include "sync.h"
 #include "video.h"
 
@@ -495,16 +496,24 @@ namespace rtsp_stream {
         return;
       }
 
+      // STREAMLINK-MOD-03: notify the agent of the new launch session before
+      // we hand it off. The launch_session is about to be moved into the
+      // launch_event so capture the UUID by value here.
+      const std::string session_uuid = launch_session ? launch_session->unique_id : std::string();
+      streamlink::notify_session_started(session_uuid, "rtsp_launch");
+
       // Raise the new launch session to prepare for the RTSP handshake
       launch_event.raise(std::move(launch_session));
 
       // Arm the timer to expire this launch session if the client times out
       raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
+      raised_timer.async_wait([this, session_uuid](const boost::system::error_code &ec) {
         if (!ec) {
           auto discarded = launch_event.pop(0s);
           if (discarded) {
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+            // STREAMLINK-MOD-03: session timed out before client pickup.
+            streamlink::notify_session_ended(session_uuid, "timeout");
           }
         }
       });
