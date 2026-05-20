@@ -1568,6 +1568,7 @@ namespace confighttp {
    *     binds publicly (it shouldn't)
    */
   void streamlink_status(resp_https_t response, req_https_t request) {
+    BOOST_LOG(debug) << "STREAMLINK-MOD-01 status handler invoked"sv;
     print_req(request);
 
     nlohmann::json output_tree;

@@ -89,6 +89,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
         "${CMAKE_SOURCE_DIR}/src/streamlink_callbacks.cpp"
         "${CMAKE_SOURCE_DIR}/src/streamlink_callbacks.h"
+        "${CMAKE_SOURCE_DIR}/src/streamlink_x265_stub.c"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
