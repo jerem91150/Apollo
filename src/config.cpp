@@ -1442,6 +1442,20 @@ namespace config {
       }
     }
 
+    // STREAMLINK-MOD-06: agent-controlled config path overrides both the
+    // built-in default and any --config CLI argument. The agent rewrites
+    // the active config on the fly to apply per-device streaming profiles
+    // (resolution / framerate / bitrate / codec) without round-tripping
+    // through the legacy config web UI.
+    if (const char *override_path = std::getenv("STREAMLINK_APOLLO_CONFIG")) {
+      if (fs::exists(override_path)) {
+        sunshine.config_file = override_path;
+      } else {
+        BOOST_LOG(warning) << "STREAMLINK_APOLLO_CONFIG points to a non-existent file: "sv
+                          << override_path << " — falling back to default"sv;
+      }
+    }
+
     bool config_loaded = false;
     try {
       // Create appdata folder if it does not exist
